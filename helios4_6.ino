@@ -149,17 +149,24 @@ Oscil <SQUARE_NO_ALIAS_2048_NUM_CELLS, AUDIO_RATE> oscil2; //Sqr wave
 // envelope generator
 ADSR <CONTROL_RATE, AUDIO_RATE> envelope;
 
+//Hold the last note played 
+byte LAST_PLAYED_NOTE;
+
 #define LED 13 // Internal LED lights up if MIDI is being received
 
 void HandleNoteOn(byte channel, byte note, byte velocity) { 
+  LAST_PLAYED_NOTE = note;
   oscil1.setFreq(mtof(float(note)));
   envelope.noteOn();
   digitalWrite(LED,HIGH);
 }
 
 void HandleNoteOff(byte channel, byte note, byte velocity) { 
-  envelope.noteOff();
-  digitalWrite(LED,LOW);
+  //Only turn off note if it is the last one we hit
+  if ( LAST_PLAYED_NOTE == note ) {  
+    envelope.noteOff();
+    digitalWrite(LED,LOW);
+  }
 }
 
 void setup() {
