@@ -28,6 +28,11 @@
  // A BlogHoskins Monstrosity @ 2019 / 2020
 // https://bloghoskins.blogspot.com/
 /*    
+ *    v5.0
+ *    Allow up to three notes to be played simultaniously 
+ *    PLAYABLE_NOTES constant controls this. more than 3 doesn't seem to work on an arduino nanao
+ *    v4.7
+ *    Fix midi keyboard ghosting
  *    v4.6 
  *    Time to fix distortion - Fixed
  *    changed update audio from 8 -> 9
@@ -120,15 +125,16 @@ LowPassFilter lpf;
 
 MIDI_CREATE_DEFAULT_INSTANCE();
 
+#define LED 5 // Internal LED lights up if MIDI is being received
+
 #define WAVE_SWITCH 2 // switch for switching waveforms
 #define LFO_ON_OFF_SWITCH 3 // switch for LFO ON/OFF
 
 // Set up Attack & Decay Envelope
 #define atkPot A5    // select the input pin for the potentiometer
-//int atkVal = 0;       // variable to store the value coming from the pot
 AutoMap atkPotMap(0, 1023, 0, 3000);  // remap the atk pot to 3 seconds
+
 #define dkyPot A4    // select the input pin for the potentiometer
-//int dkyVal = 0;       // variable to store the value coming from the pot
 AutoMap dkyPotMap(0, 1023, 0, 3000);  // remap the atk pot to 3 seconds
 
 //*******CUT-OFF POT***********
@@ -142,36 +148,105 @@ AutoMap resFreqPotMap(0, 1023, 40, 210);  // 0 - 255
 // use #define for CONTROL_RATE, not a constant
 #define CONTROL_RATE 128 // powers of 2 please
 
-// audio sinewave oscillator
-Oscil <SAW2048_NUM_CELLS, AUDIO_RATE> oscil1; //Saw Wav
-Oscil <SQUARE_NO_ALIAS_2048_NUM_CELLS, AUDIO_RATE> oscil2; //Sqr wave
+// number of playable notes at once. 3 seems to be the max for my arduino nano;
+const int PLAYABLE_NOTES = 3 ;
 
-// envelope generator
-ADSR <CONTROL_RATE, AUDIO_RATE> envelope;
+// audio sinewave oscillators
+Oscil<SAW2048_NUM_CELLS, AUDIO_RATE> oscilators[PLAYABLE_NOTES];
 
-#define LED 13 // Internal LED lights up if MIDI is being received
+// envelope generators
+ADSR <CONTROL_RATE, AUDIO_RATE> envelopes[PLAYABLE_NOTES];
 
-void HandleNoteOn(byte channel, byte note, byte velocity) { 
-  oscil1.setFreq(mtof(float(note)));
-  envelope.noteOn();
+
+//keep track of which notes are currently being played and where
+byte PLAYING[PLAYABLE_NOTES];
+
+//keep track of which is the oldest note played
+int played_order[PLAYABLE_NOTES];
+int played_index = 0;
+
+void HandleNoteOn(byte channel, byte note, byte velocity) {
   digitalWrite(LED,HIGH);
+  
+  //remove any notes that have stopped playing;
+  for ( int i =0; i < PLAYABLE_NOTES; i++ ) {
+    if (  ! envelopes[i].playing() ) { //turn off the note for envelopes
+       PLAYING[i] = NULL;
+    }
+  } 
+  
+  //first check if there is an oscilator already playing that note
+  for ( int i =0; i < PLAYABLE_NOTES; i++ ) {
+    if ( note == PLAYING[i] ) { //just use the same oscilator
+      played_order[played_index] = i;
+      played_index = (played_index + 1 ) % PLAYABLE_NOTES;
+      envelopes[i].noteOn();
+      return;
+    }
+  }
+  
+  //find an open oscilator and set its frequency
+  for( int i = 0; i < PLAYABLE_NOTES; i++ ) { 
+    if ( PLAYING[i] == NULL  && !envelopes[i].playing()) { 
+      PLAYING[i] = note;
+      oscilators[i].setFreq(mtof(float(note)));
+      envelopes[i].noteOn();
+      
+      played_order[played_index] = i;
+      played_index = (played_index + 1 ) % PLAYABLE_NOTES;
+      
+      return;
+    }
+  }
+  
+  //no open oscilator, so use the oldest one
+  int i = played_order[ ( played_index + 1 ) % PLAYABLE_NOTES ];
+  envelopes[i].noteOff();
+  oscilators[i].setFreq(mtof(float(note)));
+  envelopes[i].noteOn();
+  PLAYING[i] = note;
+
+  played_order[played_index] = i;
+  played_index = (played_index + 1 ) % PLAYABLE_NOTES;
+  
 }
 
 void HandleNoteOff(byte channel, byte note, byte velocity) { 
-  envelope.noteOff();
+  
+  for( int i = 0; i < PLAYABLE_NOTES; i++ ) { 
+    if ( PLAYING[i] == note) { 
+      envelopes[i].noteOff();
+    }
+  }
+
+  
   digitalWrite(LED,LOW);
+  
+  
 }
 
 void setup() {
 //  Serial.begin(9600); // see the output
   pinMode(LED, OUTPUT);  // built-in arduino led lights up with midi sent data 
+  digitalWrite(LED,HIGH);
+  delay(100);
+  digitalWrite(LED,LOW);
+  delay(100);
+  digitalWrite(LED,HIGH);
+  delay(100);
+  digitalWrite(LED,LOW);
   // Connect the HandleNoteOn function to the library, so it is called upon reception of a NoteOn.
   MIDI.setHandleNoteOn(HandleNoteOn);  // Put only the name of the function
   MIDI.setHandleNoteOff(HandleNoteOff);  // Put only the name of the function
   // Initiate MIDI communications, listen to all channels (not needed with Teensy usbMIDI)
   MIDI.begin(MIDI_CHANNEL_OMNI);  
-  envelope.setADLevels(255,64); // A bit of attack / decay while testing
-  oscil1.setFreq(440); // default frequency
+  
+   // A bit of attack / decay while testing
+  
+  for( int i = 0; i < PLAYABLE_NOTES; i++ ) { 
+    oscilators[i].setFreq(440); // default frequency
+    envelopes[i].setADLevels(255,64);
+  }
 
 //****************Set up LFO**************************************************************************************
   kFilterMod.setFreq(1.3f); // Can be deleted??
@@ -189,8 +264,10 @@ void updateControl(){
   atkVal = atkPotMap(atkVal);
   int dkyVal = mozziAnalogRead(dkyPot);    // read the value from the decay pot
   dkyVal = dkyPotMap(dkyVal);
-  envelope.setTimes(atkVal,60000,60000,dkyVal); // 60000 is so the note will sustain 60 seconds unless a noteOff comes
-  envelope.update();
+  for( int i = 0; i< PLAYABLE_NOTES; i++ ) {
+    envelopes[i].setTimes(atkVal,60000,60000,dkyVal); // 60000 is so the note will sustain 60 seconds unless a noteOff comes
+    envelopes[i].update();
+  }
 
   //**************RESONANCE POT****************
   int resVal = mozziAnalogRead(resPot);  // arduino checks pot value
@@ -230,18 +307,29 @@ void updateControl(){
   //**********************************END*******************************************************************************
   
   int sensorVal = digitalRead(2); // read the switch position value into a  variable
-  if (sensorVal == HIGH) // If switch is set to high, run this portion of code
-  {
-    oscil1.setTable(SAW2048_DATA);
+  
+  for( int i = 0; i < PLAYABLE_NOTES; i++ ) { 
+      if (sensorVal == HIGH) // If switch is set to high, run this portion of code
+      {
+        oscilators[i].setTable(SAW2048_DATA);
+      } else { 
+        oscilators[i].setTable(SQUARE_NO_ALIAS_2048_DATA);  
+      }
   }
-  else  // If switch not set to high, run this portion of code instead
-  {
-    oscil1.setTable(SQUARE_NO_ALIAS_2048_DATA);
-  }
+  
 }
 
+int playing = 0;
+
 int updateAudio(){
-    int asig = (envelope.next() * oscil1.next()) >> 10; // multiplying by 0-255 and then dividing by 256
+
+    //add up the playing oscilators
+    int oscil = 0 ;
+    for( int i = 0; i < PLAYABLE_NOTES; i++ ) { 
+      oscil = oscil +  (( oscilators[i].next() * envelopes[i].next() ) >> 10);
+    }
+   
+    int asig =  oscil; // multiplying by 0-255 and then dividing by 256
     int asigSVF = svf.next(asig); // SVF
     int asigLPF = lpf.next(asigSVF); // LPF
     return (asigLPF); 
